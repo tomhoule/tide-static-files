@@ -67,8 +67,8 @@ impl StaticFiles {
 
         let path = self.base.join(path);
         let file = await! { futures::compat::Compat01As03::new(tokio_fs::File::open(path)) };
-        let mut file = file.map_err(|_err| {
-            println!("Err: {:?}", _err);
+        let mut file = file.map_err(|err| {
+            log::warn!("Error reading file: {:?}", err);
             not_found_response()
         })?;
         let mut buf = Vec::new();
