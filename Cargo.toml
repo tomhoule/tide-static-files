@@ -8,8 +8,9 @@ edition = "2018"
 http = "0.1.16"
 http-service = "0.1.4"
 regex = "1.1.2"
-tide = "0.0.5"
+# tide = "0.0.5"
 futures-preview = "0.3.0-alpha.13"
+tide = { git = "https://github.com/aturon/tide", branch = "revamp" }
 tokio-fs = "0.1.6"
 # [test_dependencies]
 tokio = "0.1.17"

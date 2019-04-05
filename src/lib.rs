@@ -12,7 +12,7 @@
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
 //!   let mut app = tide::App::new(());
 //!
-//!   app.at("/assets/*").get(StaticFiles::new("/var/lib/my-app/assets"));
+//!   app.at("/assets/*path").get(StaticFiles::new("/var/lib/my-app/assets"));
 //!
 //!   # Ok(())
 //! # }
@@ -22,7 +22,7 @@ use http::StatusCode;
 use http_service::Body;
 use regex::Regex;
 use std::path::{Path, PathBuf};
-use tide::Response;
+use tide::{Context, Response};
 
 /// A struct that serves a directory.
 ///
@@ -32,7 +32,7 @@ use tide::Response;
 /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
 ///   let mut app = tide::App::new(());
 ///
-///   app.at("/assets/*").get(StaticFiles::new("/var/lib/my-app/assets"));
+///   app.at("/assets/*path").get(StaticFiles::new("/var/lib/my-app/assets"));
 ///
 ///   # Ok(())
 /// # }
@@ -40,9 +40,9 @@ use tide::Response;
 /// ```
 ///
 ///
-// The `Clone` bound can be dropped once we can use async/await in traits. For now the members of
+// The `Clone` impl can be dropped once we can use async/await in traits. For now the members of
 // this struct all need to be owned by the returned futures. It may be more forward-compatible to
-// clean members manually.
+// copy members manually.
 #[derive(Clone)]
 pub struct StaticFiles {
     base: PathBuf,
@@ -105,22 +105,16 @@ fn not_found_response() -> http::Response<http_service::Body> {
     response
 }
 
-impl<S> tide::Endpoint<S, ()> for StaticFiles {
+impl<S: 'static> tide::Endpoint<S> for StaticFiles {
+
     type Fut = futures::future::FutureObj<'static, Response>;
 
     fn call(
         &self,
-        _data: S,
-        _req: tide::Request,
-        params: Option<tide::RouteMatch<'_>>,
-        _store: &tide::configuration::Store,
+        context: Context<S>,
     ) -> Self::Fut {
-        if let Some(ref matches) = params {
-            if matches.vec.len() != 1 {
-                panic!("multiple segments (TODO: better error message)");
-            }
-
-            let path = matches.vec[0].to_owned();
+        if let Ok(path) = context.param::<String>("path") {
+            let path = path.to_owned();
 
             // Necessary until async await in traits is available.
             let cloned = self.clone();
@@ -155,7 +149,7 @@ mod tests {
     impl MockServer {
         fn simulate(
             &mut self,
-            req: tide::Request,
+            req: http::Request<http_service::Body>,
         ) -> Result<(http::response::Parts, Vec<u8>), std::io::Error> {
             use futures::FutureExt;
             use futures::StreamExt;
@@ -201,7 +195,7 @@ mod tests {
 
     #[test]
     fn static_files_simplest_case() {
-        let (mut server, dir) = test_app("/static/*");
+        let (mut server, dir) = test_app("/static/*path");
 
         let file_path = dir.path().join("meow.pdf");
         let mut file = File::create(file_path).unwrap();
@@ -222,7 +216,7 @@ mod tests {
 
     #[test]
     fn static_files_subdirectory() {
-        let (mut server, dir) = test_app("/static/*");
+        let (mut server, dir) = test_app("/static/*path");
 
         std::fs::create_dir(dir.path().join("cats")).ok();
         let file_path = dir.path().join("cats/meow.pdf");
@@ -244,7 +238,7 @@ mod tests {
 
     #[test]
     fn path_traversal_is_not_allowed() {
-        let (mut server, dir) = test_app("/static/*");
+        let (mut server, dir) = test_app("/static/*path");
 
         std::fs::create_dir(dir.path().join("cats")).ok();
         let file_path = dir.path().join("meow.pdf");
@@ -266,7 +260,7 @@ mod tests {
 
     #[test]
     fn static_files_urlencoded_is_ignored() {
-        let (mut server, dir) = test_app("/static/*");
+        let (mut server, dir) = test_app("/static/*path");
 
         std::fs::create_dir(dir.path().join("cats")).ok();
         let file_path = dir.path().join("cats/meow.pdf");
@@ -284,19 +278,6 @@ mod tests {
         assert_eq!(head.status, 404);
 
         assert_eq!(String::from_utf8(body).unwrap(), "");
-    }
-
-    #[test]
-    #[should_panic]
-    fn static_files_with_multiple_wildcards_panics() {
-        let (mut server, _dir) = test_app("/year/{}/static/*");
-
-        let req = http::Request::builder()
-            .uri("/year/2019/static/cats/meow.pdf")
-            .body(http_service::Body::empty())
-            .unwrap();
-
-        server.simulate(req).unwrap();
     }
 
     #[test]
