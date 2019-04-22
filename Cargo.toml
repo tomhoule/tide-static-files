@@ -11,9 +11,9 @@ regex = "1.1.2"
 tide = "0.1.1"
 futures-preview = "0.3.0-alpha.14"
 tokio-fs = "0.1.6"
+log = "0.4.6"
 
-# test dependencies
+[dev-dependencies]
 tokio = "0.1.17"
 tokio-threadpool = "0.1.12"
 tempfile = "3.0.7"
-log = "0.4.6"
