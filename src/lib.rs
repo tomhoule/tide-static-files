@@ -1,6 +1,4 @@
 #![feature(async_await)]
-#![feature(await_macro)]
-#![feature(futures_api)]
 
 //! A helper for serving static files in the `tide` framework. It uses `tokio_fs` and assumes it
 //! runs in the context of a tokio runtime (which is the case when you run tide with hyper, the
@@ -66,7 +64,7 @@ impl StaticFiles {
         }
 
         let path = self.base.join(path);
-        let file = await! { futures::compat::Compat01As03::new(tokio_fs::File::open(path)) };
+        let file = futures::compat::Compat01As03::new(tokio_fs::File::open(path)).await;
         let mut file = file.map_err(|err| {
             log::warn!("Error reading file: {:?}", err);
             not_found_response()
@@ -121,7 +119,7 @@ impl<S: 'static> tide::Endpoint<S> for StaticFiles {
 
             futures::future::FutureObj::new(Box::new(
                 async move {
-                    let res = await! { cloned.serve(&path) };
+                    let res = cloned.serve(&path).await;
                     match res {
                         Ok(response) => response,
                         Err(response) => response,

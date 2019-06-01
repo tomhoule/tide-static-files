@@ -6,10 +6,10 @@ edition = "2018"
 
 [dependencies]
 http = "0.1.16"
-http-service = "0.1.4"
+http-service = "*"
 regex = "1.1.2"
-tide = "0.1.1"
-futures-preview = "0.3.0-alpha.14"
+tide = "*"
+futures-preview = "0.3.0-alpha.16"
 tokio-fs = "0.1.6"
 log = "0.4.6"
 
