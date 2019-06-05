@@ -1,299 +1,59 @@
 #![feature(async_await)]
 
-//! A helper for serving static files in the `tide` framework. It uses `tokio_fs` and assumes it
-//! runs in the context of a tokio runtime (which is the case when you run tide with hyper, the
-//! default http server implementation).
+//! A helper for serving static files in the `tide` framework. It put file IO into a separate
+//! thread pool, which means it wouldn't block `tide`'s runtime.
 //!
-//! ```
-//! # use tide_static_files::StaticFiles;
-//! #
-//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
-//!   let mut app = tide::App::new(());
-//!
-//!   app.at("/assets/*path").get(StaticFiles::new("/var/lib/my-app/assets"));
-//!
-//!   # Ok(())
-//! # }
-//! ```
+//! TODO: example code
 
-use http::StatusCode;
-use http_service::Body;
-use regex::Regex;
-use std::path::{Path, PathBuf};
-use tide::{Context, Response};
+#[macro_use]
+extern crate lazy_static;
+#[macro_use]
+extern crate failure;
+#[macro_use]
+extern crate log;
+
+mod file_request;
+mod file_stream;
+mod utils;
+
+use crate::{file_request::FileRequest, utils::resolve_path};
+use std::path::PathBuf;
+use tide::{response::IntoResponse, Context, Response};
 
 /// A struct that serves a directory.
 ///
-/// ```
-/// # use tide_static_files::StaticFiles;
-/// #
-/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
-///   let mut app = tide::App::new(());
-///
-///   app.at("/assets/*path").get(StaticFiles::new("/var/lib/my-app/assets"));
-///
-///   # Ok(())
-/// # }
-///
-/// ```
-///
-///
-// The `Clone` impl can be dropped once we can use async/await in traits. For now the members of
-// this struct all need to be owned by the returned futures. It may be more forward-compatible to
-// copy members manually.
-#[derive(Clone)]
+/// TODO: example code
 pub struct StaticFiles {
     base: PathBuf,
-    path_traversal_matcher: Regex,
 }
 
 impl StaticFiles {
     /// Create a StaticFiles handler for the directory at the provided path.
-    pub fn new(path: &str) -> Self {
-        StaticFiles {
-            base: Path::new(path).into(),
-            path_traversal_matcher: Self::path_traversal_regex(),
+    ///
+    /// Return error if `base` doesn't exist or not directory or can't access
+    pub fn new(base: impl Into<PathBuf>) -> Result<Self, failure::Error> {
+        let base = base.into();
+        if !base.canonicalize()?.is_dir() {
+            bail!("given 'base' isn't a directory");
         }
+        Ok(StaticFiles { base })
     }
-
-    async fn serve<'a>(&'a self, path: &'a str) -> Result<Response, Response> {
-        use std::io::Read;
-
-        if self.path_traversal_matcher.is_match(path) {
-            return Ok(not_found_response());
-        }
-
-        let path = self.base.join(path);
-        let file = futures::compat::Compat01As03::new(tokio_fs::File::open(path)).await;
-        let mut file = file.map_err(|err| {
-            log::warn!("Error reading file: {:?}", err);
-            not_found_response()
-        })?;
-        let mut buf = Vec::new();
-
-        file.read_to_end(&mut buf).expect("TODO: error handling");
-
-        Ok(http::Response::new(buf.into()))
-    }
-
-    /// https://github.com/SergioBenitez/Rocket/blob/f857f81d9c156cbb6f8b24be173dbda0cb0504a0/core/http/src/uri/segments.rs#L65
-    /// was used as a reference
-    fn path_traversal_regex() -> Regex {
-        Regex::new(
-            r#"
-            (?x) # ignore whitespace and allow comments in the regex
-            # Double dots
-            (\.\.[/\\]) |
-            # hidden files
-            (/\.) |
-            (^\.) |
-            # initial *
-            (^\*) |
-            # \\ (windows)
-            (\\\\)
-            "#,
-        )
-        .unwrap()
-    }
-}
-
-fn not_found_response() -> http::Response<http_service::Body> {
-    let mut response = http::Response::new(Body::empty());
-    *response.status_mut() = StatusCode::NOT_FOUND;
-    response
 }
 
 impl<S: 'static> tide::Endpoint<S> for StaticFiles {
+    type Fut = futures::future::BoxFuture<'static, Response>;
 
-    type Fut = futures::future::FutureObj<'static, Response>;
+    fn call(&self, context: Context<S>) -> Self::Fut {
+        let target_path = context
+            .param::<String>("")
+            .ok()
+            .and_then(|url_path: String| resolve_path(&self.base, &url_path))
+            .and_then(|path: PathBuf| path.canonicalize().ok());
 
-    fn call(
-        &self,
-        context: Context<S>,
-    ) -> Self::Fut {
-        if let Ok(path) = context.param::<String>("path") {
-            let path = path.to_owned();
+        let file_request = FileRequest::new(target_path, context.headers());
 
-            // Necessary until async await in traits is available.
-            let cloned = self.clone();
-
-            futures::future::FutureObj::new(Box::new(
-                async move {
-                    let res = cloned.serve(&path).await;
-                    match res {
-                        Ok(response) => response,
-                        Err(response) => response,
-                    }
-                },
-            ))
-        } else {
-            unimplemented!("static file index")
-        }
+        futures::FutureExt::boxed(async move { file_request.work().await.into_response() })
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use http_service::HttpService;
-    use std::fs::File;
-    use std::io::Write;
-    use tempfile::*;
-
-    struct MockServer {
-        backend: tide::Server<()>,
-    }
-
-    impl MockServer {
-        fn simulate(
-            &mut self,
-            req: http::Request<http_service::Body>,
-        ) -> Result<(http::response::Parts, Vec<u8>), std::io::Error> {
-            use futures::FutureExt;
-            use futures::StreamExt;
-            use futures::TryFutureExt;
-            use tokio::runtime::current_thread::block_on_all;
-            use tokio_threadpool::ThreadPool;
-            let pool = ThreadPool::new();
-
-            let mut connection = block_on_all(self.backend.connect().compat()).unwrap();
-            block_on_all(pool.spawn_handle(self.backend.respond(&mut connection, req).compat()))
-                .map(|res| {
-                    let (head, body) = res.into_parts();
-                    let body = block_on_all(
-                        body.into_future()
-                            .map(|r| -> Result<_, ()> { Ok(r) })
-                            .compat(),
-                    );
-                    (
-                        head,
-                        body.unwrap()
-                            .0
-                            .map(|bytes| bytes.unwrap().to_vec())
-                            .unwrap_or_else(|| Vec::new()),
-                    )
-                })
-        }
-    }
-
-    fn test_app(mount_at: &str) -> (MockServer, TempDir) {
-        let mut app = tide::App::new(());
-        let temp_dir = TempDir::new().unwrap();
-        let endpoint = StaticFiles::new(&format!("{}", temp_dir.path().to_string_lossy()));
-
-        app.at(mount_at).get(endpoint);
-
-        (
-            MockServer {
-                backend: app.into_http_service(),
-            },
-            temp_dir,
-        )
-    }
-
-    #[test]
-    fn static_files_simplest_case() {
-        let (mut server, dir) = test_app("/static/*path");
-
-        let file_path = dir.path().join("meow.pdf");
-        let mut file = File::create(file_path).unwrap();
-
-        write!(file, "{}", "says the cat").unwrap();
-
-        let req = http::Request::builder()
-            .uri("/static/meow.pdf")
-            .body(http_service::Body::empty())
-            .unwrap();
-
-        let (head, body) = server.simulate(req).unwrap();
-
-        assert_eq!(head.status, 200);
-
-        assert_eq!(String::from_utf8(body).unwrap(), "says the cat");
-    }
-
-    #[test]
-    fn static_files_subdirectory() {
-        let (mut server, dir) = test_app("/static/*path");
-
-        std::fs::create_dir(dir.path().join("cats")).ok();
-        let file_path = dir.path().join("cats/meow.pdf");
-        let mut file = File::create(file_path).unwrap();
-
-        write!(file, "{}", "says the cat").unwrap();
-
-        let req = http::Request::builder()
-            .uri("/static/cats/meow.pdf")
-            .body(http_service::Body::empty())
-            .unwrap();
-
-        let (head, body) = server.simulate(req).unwrap();
-
-        assert_eq!(head.status, 200);
-
-        assert_eq!(String::from_utf8(body).unwrap(), "says the cat");
-    }
-
-    #[test]
-    fn path_traversal_is_not_allowed() {
-        let (mut server, dir) = test_app("/static/*path");
-
-        std::fs::create_dir(dir.path().join("cats")).ok();
-        let file_path = dir.path().join("meow.pdf");
-        let mut file = File::create(file_path).unwrap();
-
-        write!(file, "{}", "says the cat").unwrap();
-
-        let req = http::Request::builder()
-            .uri("/static/cats/../meow.pdf")
-            .body(http_service::Body::empty())
-            .unwrap();
-
-        let (head, body) = server.simulate(req).unwrap();
-
-        assert_eq!(head.status, 404);
-
-        assert_eq!(String::from_utf8(body).unwrap(), "");
-    }
-
-    #[test]
-    fn static_files_urlencoded_is_ignored() {
-        let (mut server, dir) = test_app("/static/*path");
-
-        std::fs::create_dir(dir.path().join("cats")).ok();
-        let file_path = dir.path().join("cats/meow.pdf");
-        let mut file = File::create(file_path).unwrap();
-
-        write!(file, "{}", "says the cat").unwrap();
-
-        let req = http::Request::builder()
-            .uri("/static/cats%2F/meow.pdf")
-            .body(http_service::Body::empty())
-            .unwrap();
-
-        let (head, body) = server.simulate(req).unwrap();
-
-        assert_eq!(head.status, 404);
-
-        assert_eq!(String::from_utf8(body).unwrap(), "");
-    }
-
-    #[test]
-    fn path_traversal_regex_works() {
-        let regex = StaticFiles::path_traversal_regex();
-
-        // ..
-        assert!(regex.is_match("../"));
-        assert!(regex.is_match(".."));
-        assert!(regex.is_match("/../"));
-
-        // hidden files
-        assert!(regex.is_match("/ab/.c"));
-
-        // *
-        assert!(regex.is_match("*/ab/c"));
-
-        // \\
-        assert!(regex.is_match("*/ab/c/\\e/f"));
-    }
-}
+// TODO unit test

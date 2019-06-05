@@ -10,8 +10,12 @@ use tide_static_files::StaticFiles;
 fn main() {
     let mut app = tide::App::new(());
 
-    app.at("/assets/*").get(StaticFiles::new("/var/lib/my-app/assets"));
+    app.middleware(RootLogger::new());
 
-    ...
+    app.at("/static/*").get(StaticFiles::new(".").unwrap());
+
+    // Do something
+
+    app.serve("127.0.0.1:8000").unwrap();
 }
 ```
