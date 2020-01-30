@@ -7,7 +7,7 @@
 //! # use tide_static_files::StaticFiles;
 //! #
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
-//!   let mut app = tide::App::new(());
+//!   let mut app = tide::new();
 //!
 //!   app.at("/assets/*path").get(StaticFiles::new("/var/lib/my-app/assets"));
 //!
@@ -26,7 +26,7 @@ use tide::{Response, Request};
 /// # use tide_static_files::StaticFiles;
 /// #
 /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
-///   let mut app = tide::App::new(());
+///   let mut app = tide::new();
 ///
 ///   app.at("/assets/*path").get(StaticFiles::new("/var/lib/my-app/assets"));
 ///
@@ -44,7 +44,7 @@ pub struct StaticFiles {
     base: PathBuf,
     path_traversal_matcher: Regex,
 }
-use async_std::prelude::*;
+
 use async_std::fs::File;
 use async_std::io::BufReader;
 
@@ -64,7 +64,11 @@ impl StaticFiles {
 
         let path = self.base.join(path);
 
-        let mut file = BufReader::new(File::open(path).await.expect("couldn't open file"));
+        let file = BufReader::new(File::open(path).await
+            .map_err(|err| {
+                log::warn!("Error reading file: {:?}", err);
+                not_found_response()
+            })?);
         
         Ok(Response::new(200).body(file))
     }
@@ -91,7 +95,7 @@ impl StaticFiles {
 }
 
 fn not_found_response() -> Response {
-    let mut response = Response::new(StatusCode::NOT_FOUND.into());
+    let response = Response::new(StatusCode::NOT_FOUND.into());
     response
 }
 
@@ -127,49 +131,36 @@ impl<S: 'static> tide::Endpoint<S> for StaticFiles {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use http_service::HttpService;
+    use http_service::{HttpService, };
     use std::fs::File;
     use std::io::Write;
     use tempfile::*;
+    
+    use async_std::io::ReadExt;
 
     struct MockServer {
-        backend: tide::Server<()>,
+        backend: tide::server::Service<()>,
     }
 
     impl MockServer {
-        fn simulate(
-            &mut self,
-            quereq: http::Request<http_service::Body>,
-        ) -> Result<(http::response::Parts, Vec<u8>), std::io::Error> {
-            use futures::FutureExt;
-            use futures::StreamExt;
-            use futures::TryFutureExt;
-            use tokio::runtime::current_thread::block_on_all;
-            use tokio_threadpool::ThreadPool;
-            let pool = ThreadPool::new();
+        fn simulate(&mut self, req: http_service::Request) 
+            -> Result<(http::response::Parts, Vec<u8>), std::io::Error> {
+            use async_std::*;
 
-            let mut connection = block_on_all(self.backend.connect().compat()).unwrap();
-            block_on_all(pool.spawn_handle(self.backend.respond(&mut connection, req).compat()))
-                .map(|res| {
-                    let (head, body) = res.into_parts();
-                    let body = block_on_all(
-                        body.into_future()
-                            .map(|r| -> Result<_, ()> { Ok(r) })
-                            .compat(),
-                    );
-                    (
+            let mut connection = task::block_on(self.backend.connect()).unwrap();
+            let res = task::block_on(self.backend.respond(&mut connection, req))?;
+                    let (head, mut body) = res.into_parts();
+                    let mut body_vec = Vec::new();
+                    task::block_on(body.read_to_end(&mut body_vec)).unwrap(); 
+                    Ok((
                         head,
-                        body.unwrap()
-                            .0
-                            .map(|bytes| bytes.unwrap().to_vec())
-                            .unwrap_or_else(|| Vec::new()),
-                    )
-                })
+                        body_vec
+                    ))
         }
     }
 
     fn test_app(mount_at: &str) -> (MockServer, TempDir) {
-        let mut app = tide::App::new(());
+        let mut app = tide::new();
         let temp_dir = TempDir::new().unwrap();
         let endpoint = StaticFiles::new(&format!("{}", temp_dir.path().to_string_lossy()));
 
