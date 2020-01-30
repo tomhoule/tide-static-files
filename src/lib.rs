@@ -1,4 +1,3 @@
-#![feature(async_await)]
 
 //! A helper for serving static files in the `tide` framework. It uses `tokio_fs` and assumes it
 //! runs in the context of a tokio runtime (which is the case when you run tide with hyper, the
@@ -17,10 +16,9 @@
 //! ```
 
 use http::StatusCode;
-use http_service::Body;
 use regex::Regex;
 use std::path::{Path, PathBuf};
-use tide::{Context, Response};
+use tide::{Response, Request};
 
 /// A struct that serves a directory.
 ///
@@ -46,6 +44,9 @@ pub struct StaticFiles {
     base: PathBuf,
     path_traversal_matcher: Regex,
 }
+use async_std::prelude::*;
+use async_std::fs::File;
+use async_std::io::BufReader;
 
 impl StaticFiles {
     /// Create a StaticFiles handler for the directory at the provided path.
@@ -57,23 +58,15 @@ impl StaticFiles {
     }
 
     async fn serve<'a>(&'a self, path: &'a str) -> Result<Response, Response> {
-        use std::io::Read;
-
         if self.path_traversal_matcher.is_match(path) {
             return Ok(not_found_response());
         }
 
         let path = self.base.join(path);
-        let file = futures::compat::Compat01As03::new(tokio_fs::File::open(path)).await;
-        let mut file = file.map_err(|err| {
-            log::warn!("Error reading file: {:?}", err);
-            not_found_response()
-        })?;
-        let mut buf = Vec::new();
 
-        file.read_to_end(&mut buf).expect("TODO: error handling");
-
-        Ok(http::Response::new(buf.into()))
+        let mut file = BufReader::new(File::open(path).await.expect("couldn't open file"));
+        
+        Ok(Response::new(200).body(file))
     }
 
     /// https://github.com/SergioBenitez/Rocket/blob/f857f81d9c156cbb6f8b24be173dbda0cb0504a0/core/http/src/uri/segments.rs#L65
@@ -97,9 +90,8 @@ impl StaticFiles {
     }
 }
 
-fn not_found_response() -> http::Response<http_service::Body> {
-    let mut response = http::Response::new(Body::empty());
-    *response.status_mut() = StatusCode::NOT_FOUND;
+fn not_found_response() -> Response {
+    let mut response = Response::new(StatusCode::NOT_FOUND.into());
     response
 }
 
@@ -109,9 +101,9 @@ impl<S: 'static> tide::Endpoint<S> for StaticFiles {
 
     fn call(
         &self,
-        context: Context<S>,
+        req: Request<S>,
     ) -> Self::Fut {
-        if let Ok(path) = context.param::<String>("path") {
+        if let Ok(path) = req.param::<String>("path") {
             let path = path.to_owned();
 
             // Necessary until async await in traits is available.
@@ -147,7 +139,7 @@ mod tests {
     impl MockServer {
         fn simulate(
             &mut self,
-            req: http::Request<http_service::Body>,
+            quereq: http::Request<http_service::Body>,
         ) -> Result<(http::response::Parts, Vec<u8>), std::io::Error> {
             use futures::FutureExt;
             use futures::StreamExt;

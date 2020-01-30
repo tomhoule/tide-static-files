@@ -8,9 +8,9 @@ edition = "2018"
 http = "0.1.16"
 http-service = "*"
 regex = "1.1.2"
-tide = "*"
-futures-preview = "0.3.0-alpha.16"
-tokio-fs = "0.1.6"
+tide = "^0.6"
+futures = "^0.3"
+async-std = "*"
 log = "0.4.6"
 
 [dev-dependencies]
