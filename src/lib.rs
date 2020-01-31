@@ -63,14 +63,20 @@ impl StaticFiles {
         }
 
         let path = self.base.join(path);
+        
+        let mime = mime_guess::from_path(&path).first_or_text_plain();
 
         let file = BufReader::new(File::open(path).await
             .map_err(|err| {
                 log::warn!("Error reading file: {:?}", err);
                 not_found_response()
             })?);
-        
-        Ok(Response::new(200).body(file))
+
+        let resp = Response::new(StatusCode::OK.into())
+            .set_mime(mime)
+            .body(file);
+
+        Ok(resp)
     }
 
     /// https://github.com/SergioBenitez/Rocket/blob/f857f81d9c156cbb6f8b24be173dbda0cb0504a0/core/http/src/uri/segments.rs#L65
