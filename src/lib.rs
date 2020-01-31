@@ -63,7 +63,7 @@ impl StaticFiles {
         }
 
         let path = self.base.join(path);
-        
+
         let mime = mime_guess::from_path(&path).first_or_text_plain();
 
         let file = BufReader::new(File::open(path).await
@@ -73,8 +73,8 @@ impl StaticFiles {
             })?);
 
         let resp = Response::new(StatusCode::OK.into())
-            .set_mime(mime)
-            .body(file);
+            .body(file)
+            .set_mime(mime);
 
         Ok(resp)
     }
@@ -284,5 +284,30 @@ mod tests {
 
         // \\
         assert!(regex.is_match("*/ab/c/\\e/f"));
+    }
+
+    #[test]
+    fn test_correct_mime_html () {
+        let (mut server, dir) = test_app("/static/*path");
+
+        std::fs::create_dir(dir.path().join("cats")).ok();
+        let file_path = dir.path().join("cats/meow.html");
+        let mut file = File::create(file_path).unwrap();
+
+        write!(file, "{}", "<html>says the cat</html>").unwrap();
+
+        let req = http::Request::builder()
+            .uri("/static/cats/meow.html")
+            .body(http_service::Body::empty())
+            .unwrap();
+
+        let (head, body) = server.simulate(req).unwrap();
+
+        assert_eq!(head.status, 200);
+
+        assert_eq!(String::from_utf8(body).unwrap(), "<html>says the cat</html>");
+        use http::header::*;
+        assert_eq!(head.headers[CONTENT_TYPE], "text/html");
+
     }
 }
