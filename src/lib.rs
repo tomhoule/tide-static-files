@@ -1,4 +1,3 @@
-#![feature(async_await)]
 
 //! A helper for serving static files in the `tide` framework. It uses `tokio_fs` and assumes it
 //! runs in the context of a tokio runtime (which is the case when you run tide with hyper, the
@@ -8,7 +7,7 @@
 //! # use tide_static_files::StaticFiles;
 //! #
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
-//!   let mut app = tide::App::new(());
+//!   let mut app = tide::new();
 //!
 //!   app.at("/assets/*path").get(StaticFiles::new("/var/lib/my-app/assets"));
 //!
@@ -17,10 +16,9 @@
 //! ```
 
 use http::StatusCode;
-use http_service::Body;
 use regex::Regex;
 use std::path::{Path, PathBuf};
-use tide::{Context, Response};
+use tide::{Response, Request};
 
 /// A struct that serves a directory.
 ///
@@ -28,7 +26,7 @@ use tide::{Context, Response};
 /// # use tide_static_files::StaticFiles;
 /// #
 /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
-///   let mut app = tide::App::new(());
+///   let mut app = tide::new();
 ///
 ///   app.at("/assets/*path").get(StaticFiles::new("/var/lib/my-app/assets"));
 ///
@@ -47,6 +45,9 @@ pub struct StaticFiles {
     path_traversal_matcher: Regex,
 }
 
+use async_std::fs::File;
+use async_std::io::BufReader;
+
 impl StaticFiles {
     /// Create a StaticFiles handler for the directory at the provided path.
     pub fn new(path: &str) -> Self {
@@ -57,23 +58,25 @@ impl StaticFiles {
     }
 
     async fn serve<'a>(&'a self, path: &'a str) -> Result<Response, Response> {
-        use std::io::Read;
-
         if self.path_traversal_matcher.is_match(path) {
             return Ok(not_found_response());
         }
 
         let path = self.base.join(path);
-        let file = futures::compat::Compat01As03::new(tokio_fs::File::open(path)).await;
-        let mut file = file.map_err(|err| {
-            log::warn!("Error reading file: {:?}", err);
-            not_found_response()
-        })?;
-        let mut buf = Vec::new();
 
-        file.read_to_end(&mut buf).expect("TODO: error handling");
+        let mime = mime_guess::from_path(&path).first_or_text_plain();
 
-        Ok(http::Response::new(buf.into()))
+        let file = BufReader::new(File::open(path).await
+            .map_err(|err| {
+                log::warn!("Error reading file: {:?}", err);
+                not_found_response()
+            })?);
+
+        let resp = Response::new(StatusCode::OK.into())
+            .body(file)
+            .set_mime(mime);
+
+        Ok(resp)
     }
 
     /// https://github.com/SergioBenitez/Rocket/blob/f857f81d9c156cbb6f8b24be173dbda0cb0504a0/core/http/src/uri/segments.rs#L65
@@ -97,9 +100,8 @@ impl StaticFiles {
     }
 }
 
-fn not_found_response() -> http::Response<http_service::Body> {
-    let mut response = http::Response::new(Body::empty());
-    *response.status_mut() = StatusCode::NOT_FOUND;
+fn not_found_response() -> Response {
+    let response = Response::new(StatusCode::NOT_FOUND.into());
     response
 }
 
@@ -109,9 +111,9 @@ impl<S: 'static> tide::Endpoint<S> for StaticFiles {
 
     fn call(
         &self,
-        context: Context<S>,
+        req: Request<S>,
     ) -> Self::Fut {
-        if let Ok(path) = context.param::<String>("path") {
+        if let Ok(path) = req.param::<String>("path") {
             let path = path.to_owned();
 
             // Necessary until async await in traits is available.
@@ -135,49 +137,36 @@ impl<S: 'static> tide::Endpoint<S> for StaticFiles {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use http_service::HttpService;
+    use http_service::{HttpService, };
     use std::fs::File;
     use std::io::Write;
     use tempfile::*;
+    
+    use async_std::io::ReadExt;
 
     struct MockServer {
-        backend: tide::Server<()>,
+        backend: tide::server::Service<()>,
     }
 
     impl MockServer {
-        fn simulate(
-            &mut self,
-            req: http::Request<http_service::Body>,
-        ) -> Result<(http::response::Parts, Vec<u8>), std::io::Error> {
-            use futures::FutureExt;
-            use futures::StreamExt;
-            use futures::TryFutureExt;
-            use tokio::runtime::current_thread::block_on_all;
-            use tokio_threadpool::ThreadPool;
-            let pool = ThreadPool::new();
+        fn simulate(&mut self, req: http_service::Request) 
+            -> Result<(http::response::Parts, Vec<u8>), std::io::Error> {
+            use async_std::*;
 
-            let mut connection = block_on_all(self.backend.connect().compat()).unwrap();
-            block_on_all(pool.spawn_handle(self.backend.respond(&mut connection, req).compat()))
-                .map(|res| {
-                    let (head, body) = res.into_parts();
-                    let body = block_on_all(
-                        body.into_future()
-                            .map(|r| -> Result<_, ()> { Ok(r) })
-                            .compat(),
-                    );
-                    (
+            let mut connection = task::block_on(self.backend.connect()).unwrap();
+            let res = task::block_on(self.backend.respond(&mut connection, req))?;
+                    let (head, mut body) = res.into_parts();
+                    let mut body_vec = Vec::new();
+                    task::block_on(body.read_to_end(&mut body_vec)).unwrap(); 
+                    Ok((
                         head,
-                        body.unwrap()
-                            .0
-                            .map(|bytes| bytes.unwrap().to_vec())
-                            .unwrap_or_else(|| Vec::new()),
-                    )
-                })
+                        body_vec
+                    ))
         }
     }
 
     fn test_app(mount_at: &str) -> (MockServer, TempDir) {
-        let mut app = tide::App::new(());
+        let mut app = tide::new();
         let temp_dir = TempDir::new().unwrap();
         let endpoint = StaticFiles::new(&format!("{}", temp_dir.path().to_string_lossy()));
 
@@ -295,5 +284,30 @@ mod tests {
 
         // \\
         assert!(regex.is_match("*/ab/c/\\e/f"));
+    }
+
+    #[test]
+    fn test_correct_mime_html () {
+        let (mut server, dir) = test_app("/static/*path");
+
+        std::fs::create_dir(dir.path().join("cats")).ok();
+        let file_path = dir.path().join("cats/meow.html");
+        let mut file = File::create(file_path).unwrap();
+
+        write!(file, "{}", "<html>says the cat</html>").unwrap();
+
+        let req = http::Request::builder()
+            .uri("/static/cats/meow.html")
+            .body(http_service::Body::empty())
+            .unwrap();
+
+        let (head, body) = server.simulate(req).unwrap();
+
+        assert_eq!(head.status, 200);
+
+        assert_eq!(String::from_utf8(body).unwrap(), "<html>says the cat</html>");
+        use http::header::*;
+        assert_eq!(head.headers[CONTENT_TYPE], "text/html");
+
     }
 }
